@@ -1,2 +1,9 @@
 *.class
 *.log
+bin
+lib
+out
+.bloop
+.metals
+.vscode
+

@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# bleep: a simple scala project tool and bloop bootstrapper.
+
+# project layout requirements
+# project folder must be ./src/<project>
+# scala source files must have "package <project>"
+# scala source files must be ./src/<project>/<name>.scala
+# scala test files must be ./src/<project>/<name>_test.scala
+# scala test classes must have annotation "@RunWith(classOf[JUnitPlatform])"
+
+SCALA_VERSION="3.1.2"
+
+# classpath
+CP=$(cs fetch --classpath \
+    "org.jline:jline:3.21.0" \
+    "org.scala-lang:scala-library:2.13.8" \
+    "org.scala-lang:scala3-library_3:3.1.2" \
+    "org.junit.jupiter:junit-jupiter-api:5.8.2" )
+
+# test classpath
+TP=$(cs fetch --classpath \
+    "com.novocode:junit-interface:0.11" \
+    "org.junit.platform:junit-platform-runner:1.8.2" \
+    "org.junit.jupiter:junit-jupiter-engine:5.8.2" )
+TP="$TP:$CP"
+
+JUNIT=$(cs fetch "org.junit.platform:junit-platform-console-standalone:1.8.2")
+
+function usage { echo "usage: $0 <compile|run|repl|debug|test|compile-watch|test-watch|assemble|clean> [arguments]"; exit 1; }
+
+if [ $# -lt 2 ]; then usage; fi
+CM="$1"; shift; # command
+BN="$1"; shift; # basename
+WD="$(cd $(dirname "${BASH_SOURCE[0]}") > /dev/null && pwd)"
+DS='$'; # FN=${0#*/}; BN="${FN%%.*}" # filename and basename
+SF=$(find "src/$BN" -name "*.scala" | grep -v "_test.scala" | xargs) # scala files
+TF="$(find "src/$BN" -name "*.scala" | xargs)" # test files
+
+# echo "CP=$CP"; echo "TP=$TP"; echo "JUNIT=$JUNIT";
+# echo "WD=$WD"; echo "SF=$SF"; echo "TF=$TF";
+# echo "CM=$CM"; echo "BN=$BN";
+
+mkdir -p "./out/$BN/classes" "./lib" "./bin"; rm -rf "./out/$BN/*" "./lib/$BN/*" "./bin/$BN.jar";
+if [ "$CM" = "clean" ]; then rm -rf "./jdb.ini" "./bin/$BN.jar" "./lib" "./out" "./bloop"; exit 0; fi
+if [ "$CM" != "bloop" ]; then echo ""; scalac -version; /usr/bin/time -f "%P cpu, %e seconds" scalac -explain -sourcepath "." -classpath "$TP" -d "./out/$BN/classes" $TF; fi
+if [ "$CM" = "compile" ]; then exit 0; fi
+if [ "$CM" = "run" ]; then exec java -classpath "$TP:out/$BN/classes" "$BN.$BN" "$@"; fi
+if [ "$CM" = "repl" ]; then exec scala -classpath "$TP:out/$BN/classes"; fi
+if [ "$CM" = "test" ]; then exec java -jar $JUNIT --disable-banner --exclude-engine junit-vintage --classpath "$TP:out/$BN/classes" --select-package ""; fi
+if [ "$CM" = "debug" ]; then echo -e "stop at $BN.$BN${DS}package${DS}.breakpoint()\nrun" > "./jdb.ini"; exec jdb -sourcepath "./src" -classpath "$TP:out" "$BN.$BN" "$@"; fi
+if [ "$CM" = "assemble" ]; then FILES=$(echo "$CP" | tr ":" "\n"); cd "./lib"; for FILE in $FILES; do jar xf "$FILE"; done; cd ".."; rm -f "./lib/META-INF/MANIFEST.MF"; fi
+if [ "$CM" = "assemble" ]; then scalac -classpath "$CP" -d "./bin/$BN.jar" -Xmain-class "$BN.$BN" $SF; exec jar uf "./bin/$BN.jar" -C "./lib" "."; fi
+if [ "$CM" = "compile-watch" ]; then inotifywait -m "src/$BN" -e close_write | while read d e f; do "$0" compile "$BN" || true; done; fi
+if [ "$CM" = "test-watch" ]; then inotifywait -m "src/$BN" -e close_write | while read d e f; do "$0" test "$BN" || true; done; fi
+if [ "$CM" = "bloop" ]; then
+    mkdir -p "./.bloop"; BF="./.bloop/$BN.json"; printf "" > $BF
+    JARS=$(cs fetch --classpath "org.scala-lang:scala3-compiler_3:$SCALA_VERSION" | sed 's|:|","|g')
+    printf '{ \n' >> $BF
+    printf '    "$schema": "https://scalacenter.github.io/bloop/docs/assets/bloop-schema.json", \n' >> $BF
+    printf '    "version": "1.4.0", \n' >> $BF
+    printf '    "project": { \n' >> $BF
+    printf '      "name": "%s", \n' "$BN" >> $BF
+    printf '      "directory": "%s", \n' "$(pwd)" >> $BF
+    printf '      "workspaceDir": "%s", \n' "$(pwd)" >> $BF
+    printf '      "sources": ["%s"], \n' "$(pwd)/src/$BN" >> $BF
+    printf '      "out": "%s/out/%s", \n' "$(pwd)" "$BN" >> $BF
+    printf '      "classesDir": "%s/out/%s/classes", \n' "$(pwd)" "$BN" >> $BF
+    printf '      "dependencies": [], \n' >> $BF
+    printf '      "classpath": ["%s"], \n' $(echo "$TP" | sed 's|:|","|g') >> $BF
+    printf '      "resources": [], \n' >> $BF
+    printf '      "scala": { \n' >> $BF
+    printf '          "organization": "org.scala-lang", \n' >> $BF
+    printf '          "name": "scala-compiler", \n' >> $BF
+    printf '          "version": "%s", \n' "$SCALA_VERSION" >> $BF
+    printf '          "options": [], \n' >> $BF
+    printf '          "jars": ["%s"] \n' "$JARS" >> $BF
+    printf '      }, \n' >> $BF
+    printf '      "test": { \n' >> $BF
+    printf '          "frameworks": [{"names": ["com.novocode.junit.JUnitFramework"]}], \n' >> $BF
+    printf '          "options": { \n' >> $BF
+    printf '              "excludes": [], \n' >> $BF
+    printf '              "arguments": [] \n' >> $BF
+    printf '          } \n' >> $BF
+    printf '      } \n' >> $BF
+    printf '  } \n' >> $BF
+    printf '} \n' >> $BF
+    if [ ! -z "$(command -v jq)" ]; then cp "$BF" "$BF.tmp"; cat "$BF.tmp" | jq . > "$BF"; rm "$BF.tmp"; fi
+    echo "created bloop project: $BF"
+    exit 0
+fi
+usage
