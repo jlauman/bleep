@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # bleep: a simple scala project tool and bloop bootstrapper.
+# run a single module project -- ./bleep run hello
+# generate bloop project -- ./bleep bloop hello
+
+# requires the commands:
+# - cs (coursier), jq, and /usr/bin/time
+# - java, scala, and scalac (may be installed using coursier)
 
 # project layout requirements
 # project folder must be ./src/<project>
@@ -11,35 +17,33 @@ set -euo pipefail
 
 SCALA_VERSION="3.1.2"
 
-# classpath
-CP=$(cs fetch --classpath \
-    "org.jline:jline:3.21.0" \
-    "org.scala-lang:scala-library:2.13.8" \
-    "org.scala-lang:scala3-library_3:3.1.2" \
-    "org.junit.jupiter:junit-jupiter-api:5.8.2" )
+function usage { echo "usage: $0 <compile|run|repl|debug|test|compile-watch|test-watch|assemble|clean> <project> [arguments]"; exit 1; }
+
+if [ $# -lt 2 ]; then usage; fi
+WD="$(cd $(dirname "${BASH_SOURCE[0]}") > /dev/null && pwd)"
+CM="$1"; shift; # command
+BN="$1"; shift; # basename
+if [ ! -d "./src/$BN" ]; then echo "${0}: 'src/$BN' folder does not exist."; exit 1; fi
+
+# classpath (from artifact coordinates)
+AC="org.scala-lang:scala-library:2.13.8 org.scala-lang:scala3-library_3:3.1.2"
+AC="$AC org.junit.jupiter:junit-jupiter-api:5.8.2"
+if [ -f "./src/$BN/__libs.txt" ]; then AC="$AC $(cat ./src/$BN/__libs.txt | xargs)"; fi
+CP=$(cs fetch --classpath $AC)
 
 # test classpath
-TP=$(cs fetch --classpath \
-    "com.novocode:junit-interface:0.11" \
-    "org.junit.platform:junit-platform-runner:1.8.2" \
-    "org.junit.jupiter:junit-jupiter-engine:5.8.2" )
-TP="$TP:$CP"
+AC="$AC com.novocode:junit-interface:0.11"
+AC="$AC org.junit.jupiter:junit-jupiter-engine:5.8.2 org.junit.platform:junit-platform-runner:1.8.2"
+TP=$(cs fetch --classpath $AC)
+if [ -f "./src/$BN/__mods.txt" ]; then TP="$TP:$(cat ./src/$BN/__mods.txt | xargs -I {} echo './out/{}/classes')"; fi
 
 JUNIT=$(cs fetch "org.junit.platform:junit-platform-console-standalone:1.8.2")
 
-function usage { echo "usage: $0 <compile|run|repl|debug|test|compile-watch|test-watch|assemble|clean> [arguments]"; exit 1; }
-
-if [ $# -lt 2 ]; then usage; fi
-CM="$1"; shift; # command
-BN="$1"; shift; # basename
-WD="$(cd $(dirname "${BASH_SOURCE[0]}") > /dev/null && pwd)"
 DS='$'; # FN=${0#*/}; BN="${FN%%.*}" # filename and basename
 SF=$(find "src/$BN" -name "*.scala" | grep -v "_test.scala" | xargs) # scala files
 TF="$(find "src/$BN" -name "*.scala" | xargs)" # test files
 
-# echo "CP=$CP"; echo "TP=$TP"; echo "JUNIT=$JUNIT";
-# echo "WD=$WD"; echo "SF=$SF"; echo "TF=$TF";
-# echo "CM=$CM"; echo "BN=$BN";
+# echo "CP=$CP"; echo "TP=$TP"; echo "JUNIT=$JUNIT"; echo "WD=$WD"; echo "SF=$SF"; echo "TF=$TF"; echo "CM=$CM"; echo "BN=$BN"; exit 0
 
 mkdir -p "./out/$BN/classes" "./lib" "./bin"; rm -rf "./out/$BN/*" "./lib/$BN/*" "./bin/$BN.jar";
 if [ "$CM" = "clean" ]; then rm -rf "./jdb.ini" "./bin/$BN.jar" "./lib" "./out" "./bloop"; exit 0; fi
@@ -48,11 +52,12 @@ if [ "$CM" = "compile" ]; then exit 0; fi
 if [ "$CM" = "run" ]; then exec java -classpath "$TP:out/$BN/classes" "$BN.$BN" "$@"; fi
 if [ "$CM" = "repl" ]; then exec scala -classpath "$TP:out/$BN/classes"; fi
 if [ "$CM" = "test" ]; then exec java -jar $JUNIT --disable-banner --exclude-engine junit-vintage --classpath "$TP:out/$BN/classes" --select-package ""; fi
-if [ "$CM" = "debug" ]; then echo -e "stop at $BN.$BN${DS}package${DS}.breakpoint()\nrun" > "./jdb.ini"; exec jdb -sourcepath "./src" -classpath "$TP:out" "$BN.$BN" "$@"; fi
+if [ "$CM" = "debug" ]; then echo -e "stop at $BN.$BN${DS}package${DS}.breakpoint()\nrun" > "./jdb.ini"; exec jdb -sourcepath "./src" -classpath "$TP:out/$BN/classes" "$BN.$BN" "$@"; fi
 if [ "$CM" = "assemble" ]; then FILES=$(echo "$CP" | tr ":" "\n"); cd "./lib"; for FILE in $FILES; do jar xf "$FILE"; done; cd ".."; rm -f "./lib/META-INF/MANIFEST.MF"; fi
-if [ "$CM" = "assemble" ]; then scalac -classpath "$CP" -d "./bin/$BN.jar" -Xmain-class "$BN.$BN" $SF; exec jar uf "./bin/$BN.jar" -C "./lib" "."; fi
-if [ "$CM" = "compile-watch" ]; then inotifywait -m "src/$BN" -e close_write | while read d e f; do "$0" compile "$BN" || true; done; fi
-if [ "$CM" = "test-watch" ]; then inotifywait -m "src/$BN" -e close_write | while read d e f; do "$0" test "$BN" || true; done; fi
+if [ "$CM" = "assemble" -a -f "./src/$BN/__mods.txt" ]; then cat "./src/$BN/__mods.txt" | xargs -I {} bash -c "cp -rp ./out/{}/classes/* ./lib"; fi
+if [ "$CM" = "assemble" ]; then scalac -classpath "./lib" -d "./bin/$BN.jar" -Xmain-class "$BN.$BN" $SF; exec jar uf "./bin/$BN.jar" -C "./lib" "."; fi
+if [ "$CM" = "compile-watch" ]; then inotifywait -m "./src/$BN" -e close_write | while read d e f; do "$0" compile "$BN" || true; done; fi
+if [ "$CM" = "test-watch" ]; then inotifywait -m "./src/$BN" -e close_write | while read d e f; do "$0" test "$BN" || true; done; fi
 if [ "$CM" = "bloop" ]; then
     mkdir -p "./.bloop"; BF="./.bloop/$BN.json"; printf "" > $BF
     JARS=$(cs fetch --classpath "org.scala-lang:scala3-compiler_3:$SCALA_VERSION" | sed 's|:|","|g')
@@ -86,7 +91,6 @@ if [ "$CM" = "bloop" ]; then
     printf '  } \n' >> $BF
     printf '} \n' >> $BF
     if [ ! -z "$(command -v jq)" ]; then cp "$BF" "$BF.tmp"; cat "$BF.tmp" | jq . > "$BF"; rm "$BF.tmp"; fi
-    echo "created bloop project: $BF"
-    exit 0
+    echo "created bloop project: $BF"; exit 0
 fi
 usage
