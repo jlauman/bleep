@@ -2,18 +2,20 @@
 set -euo pipefail
 # bleep: a simple scala project tool and bloop bootstrapper.
 # run a single module project -- ./bleep run hello
-# generate bloop project -- ./bleep bloop hello
+# generate a bloop project -- ./bleep bloop hello
+# bleep requires the following commands:
+#   cs (coursier), jq, inotifywait, /usr/bin/time
+#   java, scala, and scalac (last 3 installed with coursier)
 
-# requires the commands:
-# - cs (coursier), jq, and /usr/bin/time
-# - java, scala, and scalac (may be installed using coursier)
-
-# project layout requirements
+# project layout requirements are:
 # project folder must be ./src/<project>
 # scala source files must have "package <project>"
 # scala source files must be ./src/<project>/<name>.scala
 # scala test files must be ./src/<project>/<name>_test.scala
 # scala test classes must have annotation "@RunWith(classOf[JUnitPlatform])"
+# dependent library per line in ./src/<project>/__libs.txt (see coursier)
+# dependent modules per line in ./src/<project>/__mods.txt
+# bleep will not compile dependent modules.
 
 SCALA_VERSION="3.1.2"
 
@@ -35,11 +37,11 @@ CP=$(cs fetch --classpath $AC)
 AC="$AC com.novocode:junit-interface:0.11"
 AC="$AC org.junit.jupiter:junit-jupiter-engine:5.8.2 org.junit.platform:junit-platform-runner:1.8.2"
 TP=$(cs fetch --classpath $AC)
-if [ -f "./src/$BN/__mods.txt" ]; then TP="$TP:$(cat ./src/$BN/__mods.txt | xargs -I {} echo './out/{}/classes')"; fi
+if [ -f "./src/$BN/__mods.txt" ]; then TP="$TP$(cat ./src/$BN/__mods.txt | xargs -I{} printf :$WD/out/{}/classes)"; fi
 
 JUNIT=$(cs fetch "org.junit.platform:junit-platform-console-standalone:1.8.2")
 
-DS='$'; # FN=${0#*/}; BN="${FN%%.*}" # filename and basename
+DS='$'; # FN=${0#*/}; BN="${FN%%.*}" # filename and basename (for reference)
 SF=$(find "src/$BN" -name "*.scala" | grep -v "_test.scala" | xargs) # scala files
 TF="$(find "src/$BN" -name "*.scala" | xargs)" # test files
 
@@ -60,6 +62,7 @@ if [ "$CM" = "compile-watch" ]; then inotifywait -m "./src/$BN" -e close_write |
 if [ "$CM" = "test-watch" ]; then inotifywait -m "./src/$BN" -e close_write | while read d e f; do "$0" test "$BN" || true; done; fi
 if [ "$CM" = "bloop" ]; then
     mkdir -p "./.bloop"; BF="./.bloop/$BN.json"; printf "" > $BF
+    DP=""; if [ -f "./src/$BN/__mods.txt" ]; then DP=$(cat ./src/$BN/__mods.txt | xargs | sed 's| |","|g'); fi; if [ ! -z "$DP" ]; then DP="\"$DP\""; fi
     JARS=$(cs fetch --classpath "org.scala-lang:scala3-compiler_3:$SCALA_VERSION" | sed 's|:|","|g')
     printf '{ \n' >> $BF
     printf '    "$schema": "https://scalacenter.github.io/bloop/docs/assets/bloop-schema.json", \n' >> $BF
@@ -71,7 +74,7 @@ if [ "$CM" = "bloop" ]; then
     printf '      "sources": ["%s"], \n' "$(pwd)/src/$BN" >> $BF
     printf '      "out": "%s/out/%s", \n' "$(pwd)" "$BN" >> $BF
     printf '      "classesDir": "%s/out/%s/classes", \n' "$(pwd)" "$BN" >> $BF
-    printf '      "dependencies": [], \n' >> $BF
+    printf '      "dependencies": [%s], \n' "$DP" >> $BF
     printf '      "classpath": ["%s"], \n' $(echo "$TP" | sed 's|:|","|g') >> $BF
     printf '      "resources": [], \n' >> $BF
     printf '      "scala": { \n' >> $BF
